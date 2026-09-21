@@ -12,7 +12,8 @@
         "pm2:reload": "pm2 reload ecosystem.config.js --env production",
         "pm2:stop": "pm2 stop ecosystem.config.js",
         "deploy": "node scripts/one-click-deploy.js",
-        "deploy:win": "node scripts/one-click-deploy.js"
+        "deploy:win": "node scripts/one-click-deploy.js",
+        "get-key": "node scripts/get-admin-key.js"
     },
     "dependencies": {
         "archiver": "^6.0.2",
