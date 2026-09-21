@@ -64,7 +64,7 @@ app.use((err, req, res, _next) => {
 });
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
-const HOST = '127.0.0.1';
+const HOST = process.env.HOST || '127.0.0.1';
 
 const server = app.listen(PORT, HOST, () => {
   logger.info(`API listening on http://${HOST}:${PORT}`);

@@ -43,7 +43,7 @@ router.post('/create', async (req, res) => {
     duration_hours: Joi.number().integer().min(1).max(8760).when('billing', { is: 'time', then: Joi.required(), otherwise: Joi.optional() }),
     traffic_limit_gb: Joi.number().min(0.1).max(10000).when('billing', { is: 'traffic', then: Joi.required(), otherwise: Joi.optional() }),
     rotation_interval: Joi.number().integer().min(10).max(86400).when('type', { is: 'rotating', then: Joi.required(), otherwise: Joi.optional().default(60) }),
-    protocol: Joi.string().valid('http', 'socks5', 'both').default('socks5'),
+    protocol: Joi.string().valid('http', 'socks5').default('socks5'),
     auth_mode: Joi.string().valid('auto', 'custom').default('auto'),
     username: Joi.string().when('auth_mode', { is: 'custom', then: Joi.required(), otherwise: Joi.optional() }),
     password: Joi.string().when('auth_mode', { is: 'custom', then: Joi.required(), otherwise: Joi.optional() }),
@@ -63,7 +63,8 @@ router.post('/create', async (req, res) => {
     }
   }
 
-  // Tính giá + check balance
+  const isService = !!req.user.is_admin;
+  // Tính giá + check balance (service mode bỏ qua — web đã trừ ví)
   let price;
   try {
     price = calcPrice({ quantity, billing, duration_hours, traffic_limit_gb });
@@ -71,9 +72,13 @@ router.post('/create', async (req, res) => {
     return res.status(400).json({ status: 'error', code: e.code || 'VALIDATION_ERROR', message: e.message });
   }
 
-  const user = db.prepare('SELECT balance FROM users WHERE id=?').get(req.user.id);
-  if (user.balance < price) {
-    return res.status(400).json({ status: 'error', code: 'INSUFFICIENT_BALANCE', message: `Need $${price.toFixed(4)}, have $${user.balance.toFixed(4)}` });
+  if (!isService) {
+    const user = db.prepare('SELECT balance FROM users WHERE id=?').get(req.user.id);
+    if (!user || user.balance < price) {
+      return res.status(400).json({ status: 'error', code: 'INSUFFICIENT_BALANCE', message: `Need $${price.toFixed(4)}, have $${(user?.balance||0).toFixed(4)}` });
+    }
+  } else {
+    price = 0; // web đã thu tiền, không trừ balance Proxy API
   }
 
   const orderId = 'ord_' + crypto.randomBytes(4).toString('hex');
@@ -88,8 +93,7 @@ router.post('/create', async (req, res) => {
   let proxiesData = [];
   try {
     const tx = db.transaction(() => {
-      // Charge
-      charge(req.user.id, price, orderId, 'charge');
+      if (!isService && price > 0) charge(req.user.id, price, orderId, 'charge');
 
       // Tạo order
       db.prepare(`
@@ -187,9 +191,9 @@ router.get('/list', (req, res) => {
   const offset = (page - 1) * limit;
   const PUBLIC_IP = process.env.PUBLIC_IP || '127.0.0.1';
 
-  // Nếu filter theo order_id, check quyền sở hữu
-  let where = 'WHERE o.user_id = ?';
-  const params = [req.user.id];
+  const isServiceList = !!req.user.is_admin;
+  let where = isServiceList ? 'WHERE 1=1' : 'WHERE o.user_id = ?';
+  const params = isServiceList ? [] : [req.user.id];
   if (status) { where += ' AND p.status = ?'; params.push(status); }
   if (order_id) { where += ' AND p.order_id = ?'; params.push(order_id); }
 
@@ -229,19 +233,23 @@ router.post('/renew', (req, res) => {
   const { error, value } = schema.validate(req.body);
   if (error) return res.status(400).json({ status: 'error', code: 'VALIDATION_ERROR', message: error.details[0].message });
 
+  const isServiceRenew = !!req.user.is_admin;
   const order = db.prepare('SELECT * FROM orders WHERE id=?').get(value.order_id);
   if (!order) return res.status(404).json({ status: 'error', code: 'NOT_FOUND', message: 'Order not found' });
-  if (order.user_id !== req.user.id) return res.status(403).json({ status: 'error', code: 'FORBIDDEN', message: 'Not your order' });
+  if (!isServiceRenew && order.user_id !== req.user.id) return res.status(403).json({ status: 'error', code: 'FORBIDDEN', message: 'Not your order' });
   if (order.billing !== 'time') return res.status(400).json({ status: 'error', code: 'INVALID_BILLING', message: 'Only time-based orders can be renewed' });
   if (order.status !== 'active') return res.status(400).json({ status: 'error', code: 'INVALID_STATUS', message: `Order status is ${order.status}` });
 
-  const price = calcRenewPrice(order.quantity, value.extend_hours);
-  const user = db.prepare('SELECT balance FROM users WHERE id=?').get(req.user.id);
-  if (user.balance < price) return res.status(400).json({ status: 'error', code: 'INSUFFICIENT_BALANCE', message: `Need $${price.toFixed(4)}, have $${user.balance.toFixed(4)}` });
+  const renewPrice = calcRenewPrice(order.quantity, value.extend_hours);
+  const price = isServiceRenew ? 0 : renewPrice;
+  if (!isServiceRenew) {
+    const user = db.prepare('SELECT balance FROM users WHERE id=?').get(req.user.id);
+    if (!user || user.balance < renewPrice) return res.status(400).json({ status: 'error', code: 'INSUFFICIENT_BALANCE', message: `Need $${renewPrice.toFixed(4)}, have $${(user?.balance||0).toFixed(4)}` });
+  }
 
   try {
     db.transaction(() => {
-      charge(req.user.id, price, order.id, 'renew');
+      if (!isServiceRenew && price > 0) charge(req.user.id, price, order.id, 'renew');
       const currentExpiry = order.expires_at ? new Date(order.expires_at) : new Date();
       const base = currentExpiry > new Date() ? currentExpiry : new Date();
       const newExpiry = new Date(base.getTime() + value.extend_hours * 3600 * 1000).toISOString();
@@ -265,9 +273,10 @@ router.delete('/delete', (req, res) => {
   if (error) return res.status(400).json({ status: 'error', code: 'VALIDATION_ERROR', message: error.details[0].message });
 
   if (value.order_id) {
+    const isServiceDel = !!req.user.is_admin;
     const order = db.prepare('SELECT * FROM orders WHERE id=?').get(value.order_id);
     if (!order) return res.status(404).json({ status: 'error', code: 'NOT_FOUND', message: 'Order not found' });
-    if (order.user_id !== req.user.id) return res.status(403).json({ status: 'error', code: 'FORBIDDEN', message: 'Not your order' });
+    if (!isServiceDel && order.user_id !== req.user.id) return res.status(403).json({ status: 'error', code: 'FORBIDDEN', message: 'Not your order' });
 
     const proxies = db.prepare('SELECT port, ipv6 FROM proxies WHERE order_id=?').all(order.id);
     for (const p of proxies) {
@@ -288,7 +297,9 @@ router.delete('/delete', (req, res) => {
   const rows = db.prepare(`SELECT * FROM proxies WHERE id IN (${placeholders})`).all(...value.proxy_ids);
   if (rows.length === 0) return res.status(404).json({ status: 'error', code: 'NOT_FOUND', message: 'No proxies found' });
   // Check ownership
+  const isServiceDelIds = !!req.user.is_admin;
   for (const r of rows) {
+    if (isServiceDelIds) continue;
     const o = db.prepare('SELECT user_id FROM orders WHERE id=?').get(r.order_id);
     if (!o || o.user_id !== req.user.id) return res.status(403).json({ status: 'error', code: 'FORBIDDEN', message: `Proxy ${r.id} not yours` });
   }
@@ -315,10 +326,11 @@ router.post('/rotate', (req, res) => {
   const { error, value } = schema.validate(req.body);
   if (error) return res.status(400).json({ status: 'error', code: 'VALIDATION_ERROR', message: error.details[0].message });
 
+  const isServiceRotate = !!req.user.is_admin;
   const proxy = db.prepare('SELECT * FROM proxies WHERE id=?').get(value.proxy_id);
   if (!proxy) return res.status(404).json({ status: 'error', code: 'NOT_FOUND', message: 'Proxy not found' });
   const order = db.prepare('SELECT * FROM orders WHERE id=?').get(proxy.order_id);
-  if (!order || order.user_id !== req.user.id) return res.status(403).json({ status: 'error', code: 'FORBIDDEN', message: 'Not your proxy' });
+  if (!order || (!isServiceRotate && order.user_id !== req.user.id)) return res.status(403).json({ status: 'error', code: 'FORBIDDEN', message: 'Not your proxy' });
   if (order.status !== 'active') return res.status(400).json({ status: 'error', code: 'INVALID_STATUS', message: `Order is ${order.status}` });
 
   try {
@@ -349,7 +361,7 @@ router.get('/usage', (req, res) => {
   if (!orderId) return res.status(400).json({ status: 'error', code: 'VALIDATION_ERROR', message: 'order_id query required' });
   const order = db.prepare('SELECT * FROM orders WHERE id=?').get(orderId);
   if (!order) return res.status(404).json({ status: 'error', code: 'NOT_FOUND', message: 'Order not found' });
-  if (order.user_id !== req.user.id) return res.status(403).json({ status: 'error', code: 'FORBIDDEN', message: 'Not your order' });
+  if (!req.user.is_admin && order.user_id !== req.user.id) return res.status(403).json({ status: 'error', code: 'FORBIDDEN', message: 'Not your order' });
 
   const proxies = db.prepare('SELECT id, ipv6, port, bytes_in, bytes_out, status FROM proxies WHERE order_id=?').all(orderId);
   const totalBytes = proxies.reduce((s, p) => s + (p.bytes_out || 0) + (p.bytes_in || 0), 0);

@@ -20,14 +20,15 @@ function loadTemplate() {
 
 // Render config cho 1 proxy
 function renderConfig({ port, ipv6, username, password, protocol }) {
+  if (protocol === 'both') { const e=new Error('protocol both not supported'); e.code='VALIDATION_ERROR'; throw e; }
   let tpl = loadTemplate();
   let proxyLine = '';
-  if (protocol === 'socks5' || protocol === 'both') {
+  if (protocol === 'socks5') {
     proxyLine += `socks -6 -n -a -p${port} -i${BIND_IP} -e${ipv6}\n`;
   }
-  if (protocol === 'http' || protocol === 'both') {
+  if (protocol === 'http') {
     // http proxy thường chạy port+10000 để tránh trùng khi both
-    const httpPort = protocol === 'both' ? port + 10000 : port;
+    const httpPort = port;
     proxyLine += `proxy -6 -n -a -p${httpPort} -i${BIND_IP} -e${ipv6}`;
   }
   if (!proxyLine) proxyLine = `socks -6 -n -a -p${port} -i${BIND_IP} -e${ipv6}`;
