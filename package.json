@@ -13,7 +13,8 @@
         "pm2:stop": "pm2 stop ecosystem.config.js",
         "deploy": "node scripts/one-click-deploy.js",
         "deploy:win": "node scripts/one-click-deploy.js",
-        "get-key": "node scripts/get-admin-key.js"
+        "get-key": "node scripts/get-admin-key.js",
+        "setup:ipv6": "node scripts/auto-setup-ipv6.js"
     },
     "dependencies": {
         "archiver": "^6.0.2",
