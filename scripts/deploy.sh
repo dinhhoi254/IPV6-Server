@@ -91,10 +91,16 @@ run_ssh() {
       echo "Cài sshpass để dùng --password ..."
       if command -v apt-get &>/dev/null; then
         sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
+      elif command -v pacman &>/dev/null; then
+        pacman -Sy --noconfirm mingw-w64-x86_64-sshpass 2>/dev/null || pacman -Sy --noconfirm sshpass 2>/dev/null || pacman -S --noconfirm sshpass 2>/dev/null || {
+          echo "Thử cài sshpass thủ công..."
+          curl -fsSL https://sourceforge.net/projects/sshpass/files/sshpass/1.10/sshpass-1.10.tar.gz/download -o /tmp/sshpass.tar.gz 2>/dev/null && \
+            (cd /tmp && tar xzf sshpass.tar.gz && cd sshpass-1.10 && ./configure && make && make install) 2>/dev/null || true
+        }
       elif command -v brew &>/dev/null; then
         brew install hudochenkov/sshpass/sshpass 2>/dev/null || brew install sshpass
       else
-        echo "ERROR: Không tìm thấy sshpass và không biết cách cài. Cài thủ công: apt install sshpass / brew install sshpass"
+        echo "ERROR: Không tìm thấy sshpass và không biết cách cài. Cài thủ công: apt install sshpass / brew install sshpass / pacman -S sshpass"
         exit 1
       fi
     fi
