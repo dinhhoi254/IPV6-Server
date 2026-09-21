@@ -1,11 +1,11 @@
 @echo off
 REM Tu dong: SSH lay ADMIN_API_KEY + ghi vao DB web chinh (khong can vao admin)
 cd /d "%~dp0.."
-if not defined VPS_PASS (
-  set /p VPS_PASS=Nhap VPS_PASS (root@160.187.246.219): 
-)
+if defined VPS_PASS goto :run
+set /p VPS_PASS=Nhap VPS_PASS root@160.187.246.219: 
+:run
 echo ======================================================
-echo   AUTO SETUP IPv6 Proxy (VPS: 160.187.246.219)
+echo   AUTO SETUP IPv6 Proxy ^(VPS: 160.187.246.219^)
 echo   SSH lay key + ghi DB tu dong
 echo ======================================================
 node scripts/auto-setup-ipv6.js %*
