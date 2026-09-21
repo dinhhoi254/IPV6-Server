@@ -1,0 +1,15 @@
+[Unit]
+Description=3proxy instance %i
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/usr/local/bin/3proxy /opt/ipv6-proxy/configs/3proxy/proxy-%i.cfg
+ExecReload=/bin/kill -HUP $MAINPID
+PIDFile=/var/run/3proxy-%i.pid
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
