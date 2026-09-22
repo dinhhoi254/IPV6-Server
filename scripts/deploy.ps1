@@ -2,7 +2,7 @@
 # Yêu cầu: OpenSSH (ssh/scp có sẵn trên Windows 10+), hoặc Git Bash
 #
 # Ví dụ:
-#   .\scripts\deploy.ps1 -Vps "root@160.187.246.219" -Password '?BG8a$s7D-'
+#   .\scripts\deploy.ps1 -Vps "root@160.187.246.219" -Password '@5Dr6_#e2z'
 #   .\scripts\deploy.ps1 -Vps "root@1.2.3.4" -Prefix "2001:db8:abcd::/64" -Pool 7000
 #   .\scripts\deploy.ps1 -Vps "root@1.2.3.4" -Key "$env:USERPROFILE\.ssh\id_rsa"
 #   .\scripts\deploy.ps1 -Vps "root@1.2.3.4" -Domain "proxy.example.com" -Email "admin@example.com"

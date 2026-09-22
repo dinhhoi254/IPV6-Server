@@ -11,6 +11,6 @@ c.on('ready',()=>{
     if(e) throw e;
     s.on('close',()=>c.end()).on('data',d=>process.stdout.write(d)).stderr.on('data',d=>process.stderr.write(d));
   });
-}).on('error',e=>{console.error(e);process.exit(1)}).connect({host:'160.187.246.219',port:22,username:'root',password:'?BG8a\$s7D-'});
+}).on('error',e=>{console.error(e);process.exit(1)}).connect({host:'160.187.246.219',port:22,username:'root',password:'@5Dr6_#e2z'});
 "
 pause

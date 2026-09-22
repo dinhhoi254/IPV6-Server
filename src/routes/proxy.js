@@ -9,6 +9,19 @@ const { calcPrice, charge, calcRenewPrice } = require('../billing');
 const proxyManager = require('../proxy-manager');
 
 const router = express.Router();
+let hasServerColOrders=false, hasServerColProxies=false;
+try{ const c1=require('../db').db.prepare("PRAGMA table_info(orders)").all().map(x=>x.name); hasServerColOrders=c1.includes('server_id'); const c2=require('../db').db.prepare("PRAGMA table_info(proxies)").all().map(x=>x.name); hasServerColProxies=c2.includes('server_id'); }catch(_){}
+
+// GET /api/v1/proxy/servers — danh sách server active cho client chọn (auth nhưng không cần admin)
+router.get('/servers', (req, res) => {
+  try {
+    const servers = db.prepare("SELECT id, name, location, public_ip, api_url, status, sort_order FROM ipv6_servers WHERE status=1 ORDER BY sort_order ASC, id ASC").all();
+    // Không trả admin_key/webhook_secret
+    res.json({ status: 'success', total: servers.length, data: servers });
+  } catch(e) {
+    res.json({ status: 'success', total: 0, data: [] });
+  }
+});
 
 function nextAvailablePort() {
   const start = parseInt(process.env.PROXY_PORT_START || '30000', 10);
@@ -42,17 +55,26 @@ router.post('/create', async (req, res) => {
     billing: Joi.string().valid('time', 'traffic').default('time'),
     duration_hours: Joi.number().integer().min(1).max(8760).when('billing', { is: 'time', then: Joi.required(), otherwise: Joi.optional() }),
     traffic_limit_gb: Joi.number().min(0.1).max(10000).when('billing', { is: 'traffic', then: Joi.required(), otherwise: Joi.optional() }),
-    rotation_interval: Joi.number().integer().min(10).max(86400).when('type', { is: 'rotating', then: Joi.required(), otherwise: Joi.optional().default(60) }),
+    rotation_interval: Joi.number().integer().min(1).max(86400).when('type', { is: 'rotating', then: Joi.required(), otherwise: Joi.optional().default(60) }),
     protocol: Joi.string().valid('http', 'socks5').default('socks5'),
     auth_mode: Joi.string().valid('auto', 'custom').default('auto'),
     username: Joi.string().when('auth_mode', { is: 'custom', then: Joi.required(), otherwise: Joi.optional() }),
     password: Joi.string().when('auth_mode', { is: 'custom', then: Joi.required(), otherwise: Joi.optional() }),
     request_id: Joi.string().max(64).optional(), // idempotency key
+    server_id: Joi.number().integer().optional(),
   });
   const { error, value } = schema.validate(req.body);
   if (error) return res.status(400).json({ status: 'error', code: 'VALIDATION_ERROR', message: error.details[0].message });
 
-  const { quantity, type, billing, duration_hours, traffic_limit_gb, rotation_interval, protocol, auth_mode, request_id } = value;
+  const { quantity, type, billing, duration_hours, traffic_limit_gb, rotation_interval, protocol, auth_mode, request_id, server_id } = value;
+  // Resolve server_id: nếu client gửi thì validate active, nếu không thì lấy default server đầu tiên
+  let serverRow = null;
+  if (server_id) {
+    serverRow = db.prepare('SELECT * FROM ipv6_servers WHERE id=? AND status=1').get(server_id);
+    if (!serverRow) return res.status(400).json({ status: 'error', code: 'INVALID_SERVER', message: 'Server not found or inactive' });
+  } else {
+    try { serverRow = db.prepare('SELECT * FROM ipv6_servers WHERE status=1 ORDER BY sort_order ASC, id ASC LIMIT 1').get() || null; } catch(_){}
+  }
 
   // Idempotency check
   if (request_id) {
@@ -96,7 +118,11 @@ router.post('/create', async (req, res) => {
       if (!isService && price > 0) charge(req.user.id, price, orderId, 'charge');
 
       // Tạo order
-      db.prepare(`
+      if (hasServerColOrders) db.prepare(`
+        INSERT INTO orders (id, user_id, server_id, quantity, type, billing, duration_hours, traffic_limit_gb, rotation_interval, protocol, status, expires_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(orderId, req.user.id, serverRow ? serverRow.id : null, quantity, type, billing, duration_hours || null, traffic_limit_gb || null, rotation_interval || 60, protocol, 'active', expiresAt);
+      else db.prepare(`
         INSERT INTO orders (id, user_id, quantity, type, billing, duration_hours, traffic_limit_gb, rotation_interval, protocol, status, expires_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?)
       `).run(orderId, req.user.id, quantity, type, billing, duration_hours || null, traffic_limit_gb || null, rotation_interval || 60, protocol, 'active', expiresAt);
@@ -105,7 +131,10 @@ router.post('/create', async (req, res) => {
       const ips = allocate(quantity, orderId);
       const ports = findPorts(quantity);
 
-      const insProxy = db.prepare(`
+      const insProxy = hasServerColProxies ? db.prepare(`
+        INSERT INTO proxies (order_id, server_id, ipv6, port, protocol, username, password, last_rotation, status)
+        VALUES (?,?,?,?,?,?,?,datetime('now'),'active')
+      `) : db.prepare(`
         INSERT INTO proxies (order_id, ipv6, port, protocol, username, password, last_rotation, status)
         VALUES (?,?,?,?,?,?,datetime('now'),'active')
       `);
@@ -120,7 +149,8 @@ router.post('/create', async (req, res) => {
         } else {
           creds = generateProxyCreds();
         }
-        insProxy.run(orderId, ips[i], ports[i], protocol, creds.username, creds.password);
+        if (hasServerColProxies) insProxy.run(orderId, serverRow ? serverRow.id : null, ips[i], ports[i], protocol, creds.username, creds.password);
+        else insProxy.run(orderId, ips[i], ports[i], protocol, creds.username, creds.password);
         proxiesData.push({ ipv6: ips[i], port: ports[i], username: creds.username, password: creds.password, protocol });
       }
     });
@@ -136,8 +166,20 @@ router.post('/create', async (req, res) => {
   const proxyRows = db.prepare('SELECT * FROM proxies WHERE order_id=? ORDER BY port').all(orderId);
   for (const row of proxyRows) {
     try {
-      proxyManager.createProxy({ port: row.port, ipv6: row.ipv6, username: row.username, password: row.password, protocol: row.protocol });
-      try { require('../traffic-monitor').addCounter(row.ipv6); } catch (_) {}
+      const poolMode = type === 'rotating';
+      proxyManager.createProxy({
+        port: row.port,
+        proxyId: row.id,
+        ipv6: row.ipv6,
+        username: row.username,
+        password: row.password,
+        protocol: row.protocol,
+        poolMode,
+        poolSize: parseInt(process.env.ROTATING_POOL_SIZE || '5000', 10),
+      });
+      if (!poolMode) {
+        try { require('../traffic-monitor').addCounter(row.ipv6); } catch (_) {}
+      }
     } catch (e) {
       logger.error({ port: row.port, err: e.message }, '3proxy create failed (proxy vẫn trong DB, cần manual fix)');
     }
@@ -280,7 +322,7 @@ router.delete('/delete', (req, res) => {
 
     const proxies = db.prepare('SELECT port, ipv6 FROM proxies WHERE order_id=?').all(order.id);
     for (const p of proxies) {
-      try { proxyManager.removeProxy(p.port); } catch (_) {}
+      try { proxyManager.removeProxy(p.port, p.ipv6); } catch (_) {}
       try { require('../traffic-monitor').removeCounter(p.ipv6); } catch (_) {}
     }
     db.transaction(() => {
@@ -304,7 +346,7 @@ router.delete('/delete', (req, res) => {
     if (!o || o.user_id !== req.user.id) return res.status(403).json({ status: 'error', code: 'FORBIDDEN', message: `Proxy ${r.id} not yours` });
   }
   for (const r of rows) {
-    try { proxyManager.removeProxy(r.port); } catch (_) {}
+    try { proxyManager.removeProxy(r.port, r.ipv6); } catch (_) {}
     try { require('../traffic-monitor').removeCounter(r.ipv6); } catch (_) {}
     release(r.ipv6);
   }
@@ -345,18 +387,21 @@ router.post('/rotate', (req, res) => {
         port: updated.port,
         protocol: updated.protocol,
         username: updated.username,
+        password: updated.password,
+        http_url: `http://${updated.username}:${updated.password}@${PUBLIC_IP}:${updated.port}`,
         socks5_url: `socks5://${updated.username}:${updated.password}@${PUBLIC_IP}:${updated.port}`,
       },
     });
   } catch (e) {
     const code = e.code || 'INTERNAL_ERROR';
-    const status = code === 'INSUFFICIENT_POOL' ? 503 : 500;
+    const status = code === 'INSUFFICIENT_POOL' ? 503 : (code === 'TRAFFIC_LIMIT_EXCEEDED' || code === 'INVALID_STATUS' ? 400 : 500);
     res.status(status).json({ status: 'error', code, message: e.message });
   }
 });
 
 // GET /api/v1/proxy/usage
 router.get('/usage', (req, res) => {
+  try { require('../traffic-monitor').collectAndUpdate(); } catch (_) {}
   const orderId = req.query.order_id;
   if (!orderId) return res.status(400).json({ status: 'error', code: 'VALIDATION_ERROR', message: 'order_id query required' });
   const order = db.prepare('SELECT * FROM orders WHERE id=?').get(orderId);
@@ -372,6 +417,7 @@ router.get('/usage', (req, res) => {
     traffic_limit_gb: order.traffic_limit_gb,
     traffic_limit_bytes: order.traffic_limit_gb ? order.traffic_limit_gb * 1024 * 1024 * 1024 : null,
     billing: order.billing,
+    order_status: order.status,
     expires_at: order.expires_at,
     proxies: proxies.map((p) => ({ id: p.id, ip: p.ipv6, port: p.port, bytes_in: p.bytes_in, bytes_out: p.bytes_out, status: p.status })),
   });

@@ -98,7 +98,7 @@ function recycleCooldowns() {
 
 function getPoolStats() {
   const rows = db.prepare("SELECT status, COUNT(*) as c FROM ipv6_pool GROUP BY status").all();
-  const stats = { available: 0, in_use: 0, cooldown: 0, total: 0 };
+  const stats = { available: 0, in_use: 0, cooldown: 0, rot_pool: 0, total: 0 };
   for (const r of rows) { stats[r.status] = r.c; stats.total += r.c; }
   return stats;
 }

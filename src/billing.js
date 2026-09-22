@@ -66,7 +66,8 @@ function expireOrders(proxyManager) {
         db.prepare("UPDATE orders SET status='expired' WHERE id=?").run(o.id);
         const proxies = db.prepare('SELECT port, ipv6 FROM proxies WHERE order_id=?').all(o.id);
         for (const p of proxies) {
-          try { proxyManager.removeProxy(p.port); } catch (_) {}
+          try { proxyManager.removeProxy(p.port, p.ipv6); } catch (_) {}
+          try { require('./traffic-monitor').removeCounter(p.ipv6); } catch (_) {}
         }
         db.prepare('DELETE FROM proxies WHERE order_id=?').run(o.id);
         // release IPs
@@ -83,6 +84,7 @@ function expireOrders(proxyManager) {
 
 // Cron: suspend traffic-based orders vượt limit
 function suspendOverTrafficOrders(proxyManager) {
+  try { require('./traffic-monitor').collectAndUpdate(); } catch (_) {}
   const orders = db.prepare(
     "SELECT id, traffic_limit_gb, traffic_used_bytes FROM orders WHERE status='active' AND billing='traffic' AND traffic_limit_gb IS NOT NULL"
   ).all();
@@ -92,10 +94,14 @@ function suspendOverTrafficOrders(proxyManager) {
     if (o.traffic_used_bytes >= limitBytes) {
       try {
         db.prepare("UPDATE orders SET status='suspended' WHERE id=?").run(o.id);
-        const proxies = db.prepare('SELECT port FROM proxies WHERE order_id=?').all(o.id);
+        const proxies = db.prepare('SELECT port, ipv6 FROM proxies WHERE order_id=?').all(o.id);
         for (const p of proxies) {
-          try { proxyManager.removeProxy(p.port); } catch (_) {}
+          try { proxyManager.removeProxy(p.port, p.ipv6); } catch (_) {}
+          try { require('./traffic-monitor').removeCounter(p.ipv6); } catch (_) {}
         }
+        db.prepare('DELETE FROM proxies WHERE order_id=?').run(o.id);
+        const { releaseByOrder } = require('./ipv6-pool');
+        releaseByOrder(o.id);
         logger.warn({ orderId: o.id, used: o.traffic_used_bytes, limit: limitBytes }, 'Order suspended: traffic exceeded');
         count++;
       } catch (e) {

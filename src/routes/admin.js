@@ -99,4 +99,82 @@ router.post('/pool/add', (req, res) => {
   }
 });
 
+// ============ IPv6 Servers CRUD (quản lý nhiều VPS) ============
+
+// GET /api/v1/admin/servers
+router.get('/servers', (req, res) => {
+  const servers = db.prepare('SELECT * FROM ipv6_servers ORDER BY sort_order ASC, id ASC').all();
+  let hasCol = false;
+  try { hasCol = db.prepare("PRAGMA table_info(orders)").all().map(c=>c.name).includes('server_id'); } catch(_){}
+  const data = servers.map(sv => {
+    let ordersActive = null, proxiesActive = null;
+    if (hasCol) {
+      try {
+        ordersActive = db.prepare("SELECT COUNT(*) as c FROM orders WHERE server_id=? AND status='active'").get(sv.id).c;
+        proxiesActive = db.prepare("SELECT COUNT(*) as c FROM proxies WHERE server_id=? AND status='active'").get(sv.id).c;
+      } catch(_){}
+    }
+    return Object.assign({}, sv, { orders_active: ordersActive, proxies_active: proxiesActive });
+  });
+  res.json({ status: 'success', total: data.length, data });
+});
+
+router.get('/servers/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM ipv6_servers WHERE id=?').get(req.params.id);
+  if (!row) return res.status(404).json({ status: 'error', code: 'NOT_FOUND', message: 'Server not found' });
+  res.json({ status: 'success', data: row });
+});
+
+router.post('/servers', (req, res) => {
+  const schema = Joi.object({
+    name: Joi.string().max(100).required(),
+    api_url: Joi.string().uri({ scheme: ['http','https'] }).max(255).required(),
+    public_ip: Joi.string().max(64).allow('', null).default(''),
+    admin_key: Joi.string().max(512).allow('', null).default(''),
+    webhook_secret: Joi.string().max(512).allow('', null).default(''),
+    location: Joi.string().max(100).allow('', null).default(''),
+    status: Joi.number().integer().valid(0,1).default(1),
+    sort_order: Joi.number().integer().default(0),
+  });
+  const { error, value } = schema.validate(req.body);
+  if (error) return res.status(400).json({ status: 'error', code: 'VALIDATION_ERROR', message: error.details[0].message });
+  const r = db.prepare("INSERT INTO ipv6_servers (name, api_url, public_ip, admin_key, webhook_secret, location, status, sort_order, updated_at) VALUES (?,?,?,?,?,?,?,?,datetime('now'))").run(value.name, value.api_url, value.public_ip||'', value.admin_key||'', value.webhook_secret||'', value.location||'', value.status, value.sort_order);
+  const created = db.prepare('SELECT * FROM ipv6_servers WHERE id=?').get(r.lastInsertRowid);
+  logger.info({ serverId: created.id }, 'Server created');
+  res.status(201).json({ status: 'success', data: created });
+});
+
+router.put('/servers/:id', (req, res) => {
+  const cur = db.prepare('SELECT * FROM ipv6_servers WHERE id=?').get(req.params.id);
+  if (!cur) return res.status(404).json({ status: 'error', code: 'NOT_FOUND', message: 'Server not found' });
+  const schema = Joi.object({
+    name: Joi.string().max(100).optional(),
+    api_url: Joi.string().uri({ scheme: ['http','https'] }).max(255).optional(),
+    public_ip: Joi.string().max(64).allow('', null).optional(),
+    admin_key: Joi.string().max(512).allow('', null).optional(),
+    webhook_secret: Joi.string().max(512).allow('', null).optional(),
+    location: Joi.string().max(100).allow('', null).optional(),
+    status: Joi.number().integer().valid(0,1).optional(),
+    sort_order: Joi.number().integer().optional(),
+  });
+  const { error, value } = schema.validate(req.body);
+  if (error) return res.status(400).json({ status: 'error', code: 'VALIDATION_ERROR', message: error.details[0].message });
+  const fields = Object.keys(value);
+  if (fields.length === 0) return res.status(400).json({ status: 'error', code: 'NO_FIELDS', message: 'No fields to update' });
+  const sets = fields.map(k => k+'=?').join(', ');
+  const vals = fields.map(k => value[k]);
+  db.prepare("UPDATE ipv6_servers SET "+sets+", updated_at=datetime('now') WHERE id=?").run(...vals, cur.id);
+  const updated = db.prepare('SELECT * FROM ipv6_servers WHERE id=?').get(cur.id);
+  logger.info({ serverId: cur.id }, 'Server updated');
+  res.json({ status: 'success', data: updated });
+});
+
+router.delete('/servers/:id', (req, res) => {
+  const cur = db.prepare('SELECT * FROM ipv6_servers WHERE id=?').get(req.params.id);
+  if (!cur) return res.status(404).json({ status: 'error', code: 'NOT_FOUND', message: 'Server not found' });
+  db.prepare('DELETE FROM ipv6_servers WHERE id=?').run(cur.id);
+  logger.info({ serverId: cur.id }, 'Server deleted');
+  res.json({ status: 'success', message: 'Server deleted' });
+});
+
 module.exports = router;

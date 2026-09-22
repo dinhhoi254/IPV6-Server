@@ -73,13 +73,44 @@ const server = app.listen(PORT, HOST, () => {
   const proxyManager = require('./src/proxy-manager');
   const trafficMonitor = require('./src/traffic-monitor');
   const rotation = require('./src/rotation');
+  const poolHealth = require('./src/pool-health');
+  setTimeout(() => {
+    try {
+      const rotatingRows = db.prepare(`
+        SELECT p.*, o.status as order_status
+        FROM proxies p
+        JOIN orders o ON o.id = p.order_id
+        WHERE p.status='active' AND o.status='active' AND o.type='rotating'
+        ORDER BY p.port
+      `).all();
+      for (const row of rotatingRows) {
+        try {
+          proxyManager.ensureRotatingProxy({
+            port: row.port,
+            proxyId: row.id,
+            ipv6: row.ipv6,
+            username: row.username,
+            password: row.password,
+            protocol: row.protocol,
+            poolSize: parseInt(process.env.ROTATING_POOL_SIZE || '5000', 10),
+          });
+        } catch (e) {
+          logger.warn({ port: row.port, err: e.message }, 'Rotating proxy startup restore failed');
+        }
+      }
+    } catch (e) {
+      logger.warn({ err: e.message }, 'Rotating pool startup bind failed');
+    }
+  }, 2000).unref();
   setInterval(() => { try { recycleCooldowns(); } catch (e) { logger.error({ err: e.message }, 'recycleCooldowns failed'); } }, 30_000);
+  const quotaCheckMs = parseInt(process.env.TRAFFIC_QUOTA_CHECK_MS || '15000', 10);
   setInterval(() => {
     try { expireOrders(proxyManager); } catch (e) { logger.error({ err: e.message }, 'expireOrders failed'); }
     try { suspendOverTrafficOrders(proxyManager); } catch (e) { logger.error({ err: e.message }, 'suspendOverTrafficOrders failed'); }
-  }, 5 * 60_000);
-  try { trafficMonitor.start(60_000); } catch (e) { logger.warn({ err: e.message }, 'trafficMonitor start failed'); }
-  try { rotation.start(60_000); } catch (e) { logger.warn({ err: e.message }, 'rotation start failed'); }
+  }, quotaCheckMs);
+  try { trafficMonitor.start(parseInt(process.env.TRAFFIC_SYNC_MS || '15000', 10)); } catch (e) { logger.warn({ err: e.message }, 'trafficMonitor start failed'); }
+  try { rotation.start(parseInt(process.env.ROTATION_TICK_MS || '1000', 10)); } catch (e) { logger.warn({ err: e.message }, 'rotation start failed'); }
+  try { poolHealth.start(); } catch (e) { logger.warn({ err: e.message }, 'poolHealth start failed'); }
   logger.info('Background crons started');
 });
 
@@ -88,6 +119,7 @@ function shutdown(signal) {
   server.close(() => {
     try { require('./src/traffic-monitor').stop(); } catch (_) {}
     try { require('./src/rotation').stop(); } catch (_) {}
+    try { require('./src/pool-health').stop(); } catch (_) {}
     try { db.close(); } catch (_) {}
     process.exit(0);
   });
